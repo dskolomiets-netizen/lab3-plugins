@@ -6,8 +6,10 @@
 """
 
 import re
+import time
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from functools import partial
 from typing import Any, Literal, Protocol, cast
 
 from spotexport.models import Track
@@ -22,6 +24,13 @@ LINK_RE = re.compile(
 )
 # С февраля 2026 поиск отдаёт не больше 10 результатов за запрос
 SEARCH_LIMIT = 10
+# Сеть до Spotify бывает нестабильной (VPN): запрос повторяем с паузой 2, 4 с
+ATTEMPTS = 3
+RETRY_DELAY = 2.0
+
+
+class NetworkError(ConnectionError):
+    """Spotify не ответил даже после повторных попыток."""
 
 
 class SpotifyApi(Protocol):
@@ -81,10 +90,12 @@ class SpotifySource:
 
     Элементы, которые не являются доступными треками (локальные файлы,
     подкасты, недоступные в регионе), пропускаются и считаются в skipped.
+    Каждый запрос при сбое сети повторяется (см. ATTEMPTS).
     """
 
-    def __init__(self, api: SpotifyApi) -> None:
+    def __init__(self, api: SpotifyApi, retry_delay: float = RETRY_DELAY) -> None:
         self._api = api
+        self._retry_delay = retry_delay
         self.skipped: Counter[str] = Counter()
 
     def tracks(self, link: str) -> list[Track]:
@@ -93,10 +104,12 @@ class SpotifySource:
             return self.playlist(spotify_id)
         if kind == "album":
             return self.album(spotify_id)
-        return self._collect([self._api.track(spotify_id)])
+        return self._collect([self._call(partial(self._api.track, spotify_id))])
 
     def playlist(self, playlist_id: str) -> list[Track]:
-        page = self._api.playlist_items(playlist_id, limit=50, additional_types=("track",))
+        page = self._call(
+            partial(self._api.playlist_items, playlist_id, limit=50, additional_types=("track",))
+        )
         if "items" not in page:
             raise ValueError(
                 "Spotify hid the playlist contents: only its owner or collaborators can read it"
@@ -105,13 +118,28 @@ class SpotifySource:
         return self._collect(it.get("item") or it.get("track") for it in self._pages(page))
 
     def album(self, album_id: str) -> list[Track]:
-        album = self._api.album(album_id)
+        album = self._call(partial(self._api.album, album_id))
         return self._collect(self._pages(album["tracks"]), album=album["name"])
 
     def search(self, query: str, limit: int = SEARCH_LIMIT) -> list[Track]:
         limit = max(1, min(limit, SEARCH_LIMIT))
-        result = self._api.search(q=query, limit=limit, type="track")
+        result = self._call(partial(self._api.search, q=query, limit=limit, type="track"))
         return self._collect(result["tracks"]["items"])
+
+    def _call(self, request: Callable[[], JsonDict]) -> JsonDict:
+        """Выполнить запрос к API, при сбое сети повторив его с паузой."""
+        for attempt in range(1, ATTEMPTS + 1):
+            try:
+                return request()
+            except OSError as exc:
+                # Таймауты и обрывы requests - подклассы OSError; ответы
+                # Spotify с ошибкой (SpotifyException) сюда не попадают
+                if attempt == ATTEMPTS:
+                    raise NetworkError(
+                        f"Spotify did not respond after {ATTEMPTS} attempts ({exc})"
+                    ) from exc
+                time.sleep(self._retry_delay * attempt)
+        raise AssertionError("unreachable")
 
     def _collect(self, raw: Iterable[JsonDict | None], album: str | None = None) -> list[Track]:
         """Превратить объекты API в Track, пропуская и подсчитывая негодные."""
@@ -138,4 +166,4 @@ class SpotifySource:
             yield from page["items"]
             if not page.get("next"):
                 return
-            page = self._api.next(page)
+            page = self._call(partial(self._api.next, page))

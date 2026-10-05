@@ -12,7 +12,7 @@ from spotexport.bootstrap import build_registry, make_spotify_api
 from spotexport.core import Dispatcher
 from spotexport.loader import load_tracks_json
 from spotexport.models import Track
-from spotexport.spotify import SEARCH_LIMIT, SpotifySource, parse_link
+from spotexport.spotify import SEARCH_LIMIT, NetworkError, SpotifySource, parse_link
 from spotexport.text import to_ascii
 
 
@@ -79,6 +79,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(text)
     except SpotifyBaseException as exc:
         print(f"error: Spotify: {to_ascii(str(exc))}", file=sys.stderr)
+        return 1
+    except NetworkError as exc:
+        print(f"error: {to_ascii(str(exc))}", file=sys.stderr)
+        print("hint: check the internet connection / VPN and run again", file=sys.stderr)
         return 1
     except (OSError, ValueError, LookupError) as exc:
         print(f"error: {to_ascii(str(exc))}", file=sys.stderr)

@@ -2,7 +2,7 @@
 
 import pytest
 
-from spotexport.spotify import JsonDict, SpotifySource, parse_link
+from spotexport.spotify import JsonDict, NetworkError, SpotifySource, parse_link
 
 
 def track_json(spotify_id: str | None, name: str, album: str | None = None) -> JsonDict:
@@ -36,6 +36,8 @@ class FakeSpotify:
 
     def __init__(self) -> None:
         self.search_limit = 0
+        # Сколько ближайших запросов next() "зависнут" по таймауту
+        self.timeouts = 0
 
     def track(self, track_id: str) -> JsonDict:
         return NUMB
@@ -52,6 +54,10 @@ class FakeSpotify:
         return {"items": [{"item": NUMB}, {"item": LOCAL_FILE}], "next": "page-2"}
 
     def next(self, result: JsonDict) -> JsonDict:
+        if self.timeouts:
+            self.timeouts -= 1
+            # Так ведёт себя requests: ReadTimeout - подкласс OSError
+            raise TimeoutError("Read timed out")
         # Страница 2: старый формат ("track"), подкаст и недоступный трек
         return {"items": [{"track": FAINT}, {"item": EPISODE}, {"item": UNAVAILABLE}],
                 "next": None}
@@ -72,15 +78,23 @@ def test_spotify_source_with_fake_api() -> None:
         parse_link("https://music.yandex.ru/album/1")
 
     fake = FakeSpotify()
-    source = SpotifySource(fake)  # mypy проверяет, что фейк подходит под SpotifyApi
+    # mypy проверяет, что фейк подходит под SpotifyApi; паузы между повторами 0
+    source = SpotifySource(fake, retry_delay=0)
+    link = "https://open.spotify.com/playlist/1xcEiU8kWoQN3O825U31bl"
 
-    # Плейлист: две страницы; негодные элементы пропущены и посчитаны,
-    # а не роняют всю выгрузку
-    playlist = source.tracks("https://open.spotify.com/playlist/1xcEiU8kWoQN3O825U31bl")
+    # Плейлист: две страницы, вторая сначала "зависает" - запрос повторяется;
+    # негодные элементы пропущены и посчитаны, а не роняют всю выгрузку
+    fake.timeouts = 1
+    playlist = source.tracks(link)
     assert [t.title for t in playlist] == ["Numb", "Faint"]
+    assert fake.timeouts == 0
     assert source.skipped == {
         "local file": 1, "podcast episode": 1, "unavailable in your region": 1
     }
+    # Сеть лежит совсем - понятная ошибка после всех попыток
+    fake.timeouts = 100
+    with pytest.raises(NetworkError, match="did not respond after 3 attempts"):
+        source.tracks(link)
     # Альбом: имя альбома берётся из самого альбома
     album = source.tracks("https://open.spotify.com/album/4Gfnly5CzMJQqkUFfoHaP3")
     assert [(t.title, t.album) for t in album] == [("Numb", "Meteora")]
