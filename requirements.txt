@@ -1,0 +1,5 @@
+# Клиент Spotify Web API (HTTP + вход через OAuth)
+spotipy==2.26.0
+# Инструменты проверки
+pytest==9.1.1
+mypy==2.4.0
