@@ -6,7 +6,8 @@
 """
 
 import re
-from collections.abc import Iterator
+from collections import Counter
+from collections.abc import Iterable, Iterator
 from typing import Any, Literal, Protocol, cast
 
 from spotexport.models import Track
@@ -47,10 +48,23 @@ def parse_link(link: str) -> tuple[LinkKind, str]:
     return cast(LinkKind, match.group(1)), match.group(2)
 
 
-def track_from_json(data: JsonDict | None, album: str | None = None) -> Track | None:
-    """Объект трека из API -> Track. Локальные файлы и подкасты пропускаем (None)."""
-    if not data or data.get("type", "track") != "track" or not data.get("id"):
-        return None
+def skip_reason(data: JsonDict) -> str | None:
+    """Почему элемент нельзя выгрузить как трек Spotify; None - можно."""
+    if data.get("is_local"):
+        return "local file"
+    if data.get("type", "track") != "track":
+        return "podcast episode"
+    if not data.get("id"):
+        return "no spotify id"
+    if not data.get("name"):
+        # Недоступный в стране аккаунта трек приходит с пустыми полями
+        reason = (data.get("restrictions") or {}).get("reason")
+        return "unavailable in your region" if reason == "market" else "empty track data"
+    return None
+
+
+def track_from_json(data: JsonDict, album: str | None = None) -> Track:
+    """Объект трека из API -> Track; испорченные данные отвергнет __post_init__."""
     return Track(
         id=str(data["id"]),
         title=str(data["name"]),
@@ -63,10 +77,15 @@ def track_from_json(data: JsonDict | None, album: str | None = None) -> Track | 
 
 
 class SpotifySource:
-    """Достаёт треки плейлиста, альбома, одного трека или поиска."""
+    """Достаёт треки плейлиста, альбома, одного трека или поиска.
+
+    Элементы, которые не являются доступными треками (локальные файлы,
+    подкасты, недоступные в регионе), пропускаются и считаются в skipped.
+    """
 
     def __init__(self, api: SpotifyApi) -> None:
         self._api = api
+        self.skipped: Counter[str] = Counter()
 
     def tracks(self, link: str) -> list[Track]:
         kind, spotify_id = parse_link(link)
@@ -74,8 +93,7 @@ class SpotifySource:
             return self.playlist(spotify_id)
         if kind == "album":
             return self.album(spotify_id)
-        track = track_from_json(self._api.track(spotify_id))
-        return [track] if track else []
+        return self._collect([self._api.track(spotify_id)])
 
     def playlist(self, playlist_id: str) -> list[Track]:
         page = self._api.playlist_items(playlist_id, limit=50, additional_types=("track",))
@@ -84,19 +102,35 @@ class SpotifySource:
                 "Spotify hid the playlist contents: only its owner or collaborators can read it"
             )
         # С февраля 2026 трек лежит в поле "item", раньше было "track"
-        found = (track_from_json(it.get("item") or it.get("track")) for it in self._pages(page))
-        return [t for t in found if t is not None]
+        return self._collect(it.get("item") or it.get("track") for it in self._pages(page))
 
     def album(self, album_id: str) -> list[Track]:
         album = self._api.album(album_id)
-        found = (track_from_json(t, album=album["name"]) for t in self._pages(album["tracks"]))
-        return [t for t in found if t is not None]
+        return self._collect(self._pages(album["tracks"]), album=album["name"])
 
     def search(self, query: str, limit: int = SEARCH_LIMIT) -> list[Track]:
         limit = max(1, min(limit, SEARCH_LIMIT))
         result = self._api.search(q=query, limit=limit, type="track")
-        found = (track_from_json(t) for t in result["tracks"]["items"])
-        return [t for t in found if t is not None]
+        return self._collect(result["tracks"]["items"])
+
+    def _collect(self, raw: Iterable[JsonDict | None], album: str | None = None) -> list[Track]:
+        """Превратить объекты API в Track, пропуская и подсчитывая негодные."""
+        tracks: list[Track] = []
+        for data in raw:
+            if not data:
+                # "item": null - обычно трек удалён из каталога Spotify
+                self.skipped["no data from Spotify"] += 1
+                continue
+            reason = skip_reason(data)
+            if reason is None:
+                try:
+                    tracks.append(track_from_json(data, album))
+                    continue
+                except (KeyError, TypeError, ValueError):
+                    # Валидация Track отсеяла испорченный ответ API
+                    reason = "invalid track data"
+            self.skipped[reason] += 1
+        return tracks
 
     def _pages(self, page: JsonDict) -> Iterator[JsonDict]:
         """Элементы всех страниц: API отдаёт списки кусками по 50."""

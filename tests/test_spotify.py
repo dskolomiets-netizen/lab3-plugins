@@ -22,8 +22,13 @@ def track_json(spotify_id: str | None, name: str, album: str | None = None) -> J
 
 NUMB = track_json("2nLtzopw4rPReszdYBJU6h", "Numb", "Meteora")
 FAINT = track_json("4WmrBYIxDqZ3DJNwKuWU4b", "Faint", "Meteora")
-LOCAL_FILE = track_json(None, "my_demo.mp3", "")      # локальный файл: id нет
+# Локальный файл: id нет
+LOCAL_FILE = track_json(None, "my_demo.mp3", "") | {"is_local": True}
 EPISODE = {"type": "episode", "id": "5mP2Wrzp9ZPCBoAXMIJ0MM", "name": "Podcast"}
+# Трек, недоступный в стране аккаунта: Spotify присылает его с пустыми полями
+UNAVAILABLE = track_json("5owX8aH0A5ODOmFmD32NQe", "", "") | {
+    "artists": [{"name": ""}], "duration_ms": 0, "restrictions": {"reason": "market"}
+}
 
 
 class FakeSpotify:
@@ -47,8 +52,9 @@ class FakeSpotify:
         return {"items": [{"item": NUMB}, {"item": LOCAL_FILE}], "next": "page-2"}
 
     def next(self, result: JsonDict) -> JsonDict:
-        # Страница 2 в старом формате ("track") и подкаст, который пропускаем
-        return {"items": [{"track": FAINT}, {"item": EPISODE}], "next": None}
+        # Страница 2: старый формат ("track"), подкаст и недоступный трек
+        return {"items": [{"track": FAINT}, {"item": EPISODE}, {"item": UNAVAILABLE}],
+                "next": None}
 
     def search(self, q: str, *, limit: int, type: str) -> JsonDict:
         self.search_limit = limit
@@ -68,9 +74,13 @@ def test_spotify_source_with_fake_api() -> None:
     fake = FakeSpotify()
     source = SpotifySource(fake)  # mypy проверяет, что фейк подходит под SpotifyApi
 
-    # Плейлист: две страницы, локальный файл и подкаст пропущены
+    # Плейлист: две страницы; негодные элементы пропущены и посчитаны,
+    # а не роняют всю выгрузку
     playlist = source.tracks("https://open.spotify.com/playlist/1xcEiU8kWoQN3O825U31bl")
     assert [t.title for t in playlist] == ["Numb", "Faint"]
+    assert source.skipped == {
+        "local file": 1, "podcast episode": 1, "unavailable in your region": 1
+    }
     # Альбом: имя альбома берётся из самого альбома
     album = source.tracks("https://open.spotify.com/album/4Gfnly5CzMJQqkUFfoHaP3")
     assert [(t.title, t.album) for t in album] == [("Numb", "Meteora")]

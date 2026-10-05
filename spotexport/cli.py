@@ -29,9 +29,11 @@ def _load(args: argparse.Namespace) -> list[Track]:
     kind = parse_link(args.link)[0] if args.link else None
     # Вход через браузер нужен только для плейлистов
     source = SpotifySource(make_spotify_api(user_login=kind == "playlist"))
-    if args.search:
-        return source.search(args.search, args.limit)
-    return source.tracks(args.link)
+    tracks = source.search(args.search, args.limit) if args.search else source.tracks(args.link)
+    if source.skipped:
+        details = ", ".join(f"{reason}: {n}" for reason, n in source.skipped.most_common())
+        print(f"note: skipped {source.skipped.total()} items ({details})", file=sys.stderr)
+    return tracks
 
 
 def main(argv: Sequence[str] | None = None) -> int:
