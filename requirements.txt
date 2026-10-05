@@ -1,5 +1,6 @@
-# Клиент Spotify Web API (HTTP + вход через OAuth)
+# ASCII only: old pip on Windows reads this file in the locale encoding
+# Spotify Web API client (HTTP + OAuth login)
 spotipy==2.26.0
-# Инструменты проверки
+# Checks
 pytest==9.1.1
 mypy==2.4.0
