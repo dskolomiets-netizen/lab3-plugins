@@ -20,9 +20,14 @@ class TxtExporter:
         return "\n".join(f"{', '.join(t.artists)} - {t.title}" for t in tracks)
 
 
+def _parse(path: Path) -> ast.Module:
+    # Байты, а не текст: ast сам разберёт кодировку и BOM, как интерпретатор
+    return ast.parse(path.read_bytes())
+
+
 def _imports(path: Path) -> set[str]:
     found: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for node in ast.walk(_parse(path)):
         if isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
@@ -55,6 +60,5 @@ def test_new_plugin_works_without_core_changes(tracks: list[Track]) -> None:
     assert len(plugin_files) >= 3
     for path in plugin_files:
         assert "spotexport.protocols" not in _imports(path), path.name
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+        classes = [n for n in ast.walk(_parse(path)) if isinstance(n, ast.ClassDef)]
         assert classes and all(not c.bases for c in classes), path.name
